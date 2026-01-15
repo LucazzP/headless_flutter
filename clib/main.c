@@ -7,7 +7,7 @@
 //   lib/libapp.so               (release/profile AOT)
 //
 // Run with:
-//   ./embedder /absolute/path/to/bundle
+//   ./embeddedFlutterApp /absolute/path/to/bundle
 // or set FOO_BUNDLE_PATH to the same directory. The process stays alive until
 // SIGINT/SIGTERM (or Ctrl+C on Windows).
 
@@ -17,13 +17,12 @@
 #else
 #include <dlfcn.h>
 #include <pthread.h>
-#include <signal.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 #endif
 
-#include <errno.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -46,15 +45,15 @@ static size_t g_tasks_capacity = 0;
 static FlutterEngine g_engine = NULL;
 static FlutterEngineAOTData g_aot_data = NULL;
 #ifdef _WIN32
-static HMODULE g_aot_dylib = NULL; // LoadLibrary handle for Windows
 static DWORD g_main_thread_id;
+static HANDLE g_shutdown_event = NULL;
 #elif defined(__APPLE__)
 static void *g_aot_dylib = NULL; // dlopen handle for macOS
 static pthread_t g_main_thread;
 #else
 static pthread_t g_main_thread;
 #endif
-static volatile bool g_running = true;
+static volatile sig_atomic_t g_running = 1;
 
 static uint64_t monotonic_time_now_ns(void) {
 #ifdef _WIN32
@@ -120,8 +119,13 @@ static void sleep_until(uint64_t target_time_nanos) {
   uint64_t delta = target_time_nanos - now;
 #ifdef _WIN32
   DWORD ms = (DWORD)(delta / NSEC_PER_MSEC);
-  if (ms > 0)
-    Sleep(ms);
+  if (ms > 0) {
+    if (g_shutdown_event) {
+      WaitForSingleObject(g_shutdown_event, ms);
+    } else {
+      Sleep(ms);
+    }
+  }
 #else
   struct timespec ts;
   ts.tv_sec = delta / NSEC_PER_SEC;
@@ -130,22 +134,51 @@ static void sleep_until(uint64_t target_time_nanos) {
 #endif
 }
 
+static void handle_signal(int signo) {
+  (void)signo;
+  g_running = 0;
+#ifdef _WIN32
+  if (g_shutdown_event) {
+    SetEvent(g_shutdown_event);
+  }
+#endif
+}
+
 #ifdef _WIN32
 static BOOL WINAPI console_handler(DWORD ctrl_type) {
-  (void)ctrl_type;
-  g_running = false;
-  return TRUE;
+  switch (ctrl_type) {
+  case CTRL_C_EVENT:
+  case CTRL_BREAK_EVENT:
+  case CTRL_CLOSE_EVENT:
+  case CTRL_LOGOFF_EVENT:
+  case CTRL_SHUTDOWN_EVENT:
+    g_running = 0;
+    if (g_shutdown_event) {
+      SetEvent(g_shutdown_event);
+    }
+    return TRUE;
+  default:
+    return FALSE;
+  }
 }
 
 static void install_signal_handlers(void) {
+  if (GetConsoleWindow() == NULL) {
+    AttachConsole(ATTACH_PARENT_PROCESS);
+  }
+  g_shutdown_event = CreateEvent(NULL, TRUE, FALSE, NULL);
   SetConsoleCtrlHandler(console_handler, TRUE);
+  HANDLE stdin_handle = GetStdHandle(STD_INPUT_HANDLE);
+  if (stdin_handle != INVALID_HANDLE_VALUE) {
+    DWORD mode = 0;
+    if (GetConsoleMode(stdin_handle, &mode)) {
+      SetConsoleMode(stdin_handle, mode | ENABLE_PROCESSED_INPUT);
+    }
+  }
+  signal(SIGINT, handle_signal);
+  signal(SIGTERM, handle_signal);
 }
 #else
-static void handle_signal(int signo) {
-  (void)signo;
-  g_running = false;
-}
-
 static void install_signal_handlers(void) {
   struct sigaction sa;
   memset(&sa, 0, sizeof(sa));
@@ -196,7 +229,20 @@ static bool file_exists(const char *path) {
           !(attrib & FILE_ATTRIBUTE_DIRECTORY));
 #else
   struct stat st;
-  return stat(path, &st) == 0;
+  return stat(path, &st) == 0 && !S_ISDIR(st.st_mode);
+#endif
+}
+
+static bool dir_exists(const char *path) {
+  if (!path)
+    return false;
+#ifdef _WIN32
+  DWORD attrib = GetFileAttributesA(path);
+  return (attrib != INVALID_FILE_ATTRIBUTES &&
+          (attrib & FILE_ATTRIBUTE_DIRECTORY));
+#else
+  struct stat st;
+  return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
 #endif
 }
 
@@ -215,10 +261,62 @@ static const char *bundle_path_from_args(int argc, char **argv) {
     return env_path;
   if (argc > 1)
     return argv[1];
-  return "./";
+  
+  // Return current working directory
+  static char cwd[4096];
+#ifdef _WIN32
+  GetCurrentDirectoryA(sizeof(cwd), cwd);
+#else
+  getcwd(cwd, sizeof(cwd));
+#endif
+  return cwd;
+}
+
+// Cleanup function to ensure all resources are freed
+static void cleanup(char *assets_path, char *icu_path, char *aot_lib_path) {
+  // Shutdown Flutter engine if running
+  if (g_engine) {
+    fprintf(stdout, "Shutting down Flutter engine...\n");
+    FlutterEngineShutdown(g_engine);
+    g_engine = NULL;
+  }
+
+#if defined(__APPLE__)
+  if (g_aot_dylib) {
+    dlclose(g_aot_dylib);
+    g_aot_dylib = NULL;
+  }
+#else
+  // Windows and Linux use ELF-based AOT data
+  if (g_aot_data) {
+    FlutterEngineCollectAOTData(g_aot_data);
+    g_aot_data = NULL;
+  }
+#endif
+
+  // Free allocated paths
+  free(assets_path);
+  free(icu_path);
+  free(aot_lib_path);
+  free(g_tasks);
+  g_tasks = NULL;
+  g_tasks_count = 0;
+  g_tasks_capacity = 0;
+
+#ifdef _WIN32
+  if (g_shutdown_event) {
+    CloseHandle(g_shutdown_event);
+    g_shutdown_event = NULL;
+  }
+#endif
 }
 
 int main(int argc, char **argv) {
+  int exit_code = 0;
+  char *assets_path = NULL;
+  char *icu_path = NULL;
+  char *aot_lib_path = NULL;
+
 #ifdef _WIN32
   g_main_thread_id = GetCurrentThreadId();
 #else
@@ -228,40 +326,36 @@ int main(int argc, char **argv) {
   install_signal_handlers();
 
   const char *bundle_root = bundle_path_from_args(argc, argv);
-  char *assets_path = join_path(bundle_root, "flutter_assets");
-  char *icu_path = join_path(bundle_root, "icudtl.dat");
+  assets_path = join_path(bundle_root, "flutter_assets");
+  icu_path = join_path(bundle_root, "icudtl.dat");
 
   // Platform-specific AOT library paths
 #ifdef _WIN32
-  char *aot_lib_path = join_path(bundle_root, "app.so");
+  aot_lib_path = join_path(bundle_root, "app.so");
   if (!file_exists(aot_lib_path)) {
     free(aot_lib_path);
     aot_lib_path = join_path(bundle_root, "libapp.dll");
   }
 #elif defined(__APPLE__)
   // Try App.framework first (flutter build output), then libapp.dylib
-  char *aot_lib_path = join_path(bundle_root, "App.framework/Versions/A/App");
+  aot_lib_path = join_path(bundle_root, "App.framework/Versions/A/App");
   if (!file_exists(aot_lib_path)) {
     free(aot_lib_path);
     aot_lib_path = join_path(bundle_root, "libapp.dylib");
   }
 #else
-  char *aot_lib_path = join_path(bundle_root, "libapp.so");
+  aot_lib_path = join_path(bundle_root, "libapp.so");
 #endif
 
-  if (!file_exists(assets_path)) {
+  if (!dir_exists(assets_path)) {
     fprintf(stderr, "Missing flutter assets at %s\n", assets_path);
-    free(assets_path);
-    free(icu_path);
-    free(aot_lib_path);
-    return 1;
+    exit_code = 1;
+    goto cleanup_and_exit;
   }
   if (!file_exists(icu_path)) {
     fprintf(stderr, "Missing ICU data at %s\n", icu_path);
-    free(assets_path);
-    free(icu_path);
-    free(aot_lib_path);
-    return 1;
+    exit_code = 1;
+    goto cleanup_and_exit;
   }
 
   bool use_aot = file_exists(aot_lib_path);
@@ -274,7 +368,7 @@ int main(int argc, char **argv) {
       -dTargetPlatform=windows-x64 \
       -dBuildMode=release \
       -dTreeShakeIcons=true \
-      release_windows_bundle_flutter_assets\n");
+      release_bundle_windows-x64_assets\n");
 #elif defined(__APPLE__)
     fprintf(stderr, "Build with: flutter assemble \
       --output=clib/build/macos-arm64 \
@@ -292,65 +386,40 @@ int main(int argc, char **argv) {
       -dTreeShakeIcons=true \
       release_linux_bundle_flutter_assets\n");
 #endif
-    free(assets_path);
-    free(icu_path);
-    free(aot_lib_path);
-    return 1;
+    exit_code = 1;
+    goto cleanup_and_exit;
   }
 
-  // Snapshot pointers (set by platform-specific loading below)
+  // Snapshot pointers (only needed for macOS which uses dlopen)
+#ifdef __APPLE__
   const uint8_t *vm_snapshot_data = NULL;
   const uint8_t *vm_snapshot_instr = NULL;
   const uint8_t *isolate_snapshot_data = NULL;
   const uint8_t *isolate_snapshot_instr = NULL;
+#endif
 
-#ifdef _WIN32
-  // Windows: Use LoadLibrary/GetProcAddress to load DLL symbols
-  g_aot_dylib = LoadLibraryA(aot_lib_path);
-  if (!g_aot_dylib) {
-    fprintf(stderr, "Failed to LoadLibrary %s: error %lu\n", aot_lib_path,
-            GetLastError());
-    free(assets_path);
-    free(icu_path);
-    free(aot_lib_path);
-    return 1;
+#if defined(_WIN32) || defined(__linux__)
+  // Windows and Linux: Use ELF loader
+  FlutterEngineAOTDataSource aot_source = {0};
+  aot_source.type = kFlutterEngineAOTDataSourceTypeElfPath;
+  aot_source.elf_path = aot_lib_path;
+
+  FlutterEngineResult aot_result =
+      FlutterEngineCreateAOTData(&aot_source, &g_aot_data);
+  if (aot_result != kSuccess) {
+    fprintf(stderr, "Failed to create AOT data from %s: %d\n", aot_lib_path,
+            aot_result);
+    exit_code = 1;
+    goto cleanup_and_exit;
   }
-
-  vm_snapshot_data =
-      (const uint8_t *)GetProcAddress(g_aot_dylib, "kDartVmSnapshotData");
-  vm_snapshot_instr =
-      (const uint8_t *)GetProcAddress(g_aot_dylib, "kDartVmSnapshotInstructions");
-  isolate_snapshot_data =
-      (const uint8_t *)GetProcAddress(g_aot_dylib, "kDartIsolateSnapshotData");
-  isolate_snapshot_instr =
-      (const uint8_t *)GetProcAddress(g_aot_dylib, "kDartIsolateSnapshotInstructions");
-
-  if (!vm_snapshot_data || !vm_snapshot_instr || !isolate_snapshot_data ||
-      !isolate_snapshot_instr) {
-    fprintf(stderr, "Failed to find AOT symbols in %s\n", aot_lib_path);
-    fprintf(stderr, "  vm_snapshot_data: %p\n", (void *)vm_snapshot_data);
-    fprintf(stderr, "  vm_snapshot_instr: %p\n", (void *)vm_snapshot_instr);
-    fprintf(stderr, "  isolate_snapshot_data: %p\n",
-            (void *)isolate_snapshot_data);
-    fprintf(stderr, "  isolate_snapshot_instr: %p\n",
-            (void *)isolate_snapshot_instr);
-    FreeLibrary(g_aot_dylib);
-    g_aot_dylib = NULL;
-    free(assets_path);
-    free(icu_path);
-    free(aot_lib_path);
-    return 1;
-  }
-  fprintf(stdout, "Loaded AOT library (LoadLibrary): %s\n", aot_lib_path);
+  fprintf(stdout, "Loaded AOT library (ELF): %s\n", aot_lib_path);
 #elif defined(__APPLE__)
   // macOS: Use dlopen/dlsym to load Mach-O symbols
   g_aot_dylib = dlopen(aot_lib_path, RTLD_NOW | RTLD_LOCAL);
   if (!g_aot_dylib) {
     fprintf(stderr, "Failed to dlopen %s: %s\n", aot_lib_path, dlerror());
-    free(assets_path);
-    free(icu_path);
-    free(aot_lib_path);
-    return 1;
+    exit_code = 1;
+    goto cleanup_and_exit;
   }
 
   vm_snapshot_data = (const uint8_t *)dlsym(g_aot_dylib, "kDartVmSnapshotData");
@@ -370,31 +439,10 @@ int main(int argc, char **argv) {
             (void *)isolate_snapshot_data);
     fprintf(stderr, "  isolate_snapshot_instr: %p\n",
             (void *)isolate_snapshot_instr);
-    dlclose(g_aot_dylib);
-    g_aot_dylib = NULL;
-    free(assets_path);
-    free(icu_path);
-    free(aot_lib_path);
-    return 1;
+    exit_code = 1;
+    goto cleanup_and_exit;
   }
   fprintf(stdout, "Loaded AOT library (dlopen): %s\n", aot_lib_path);
-#else
-  // Linux: Use ELF loader
-  FlutterEngineAOTDataSource aot_source = {0};
-  aot_source.type = kFlutterEngineAOTDataSourceTypeElfPath;
-  aot_source.elf_path = aot_lib_path;
-
-  FlutterEngineResult aot_result =
-      FlutterEngineCreateAOTData(&aot_source, &g_aot_data);
-  if (aot_result != kSuccess) {
-    fprintf(stderr, "Failed to create AOT data from %s: %d\n", aot_lib_path,
-            aot_result);
-    free(assets_path);
-    free(icu_path);
-    free(aot_lib_path);
-    return 1;
-  }
-  fprintf(stdout, "Loaded AOT library (ELF): %s\n", aot_lib_path);
 #endif
 
   FlutterRendererConfig config = {0};
@@ -409,12 +457,13 @@ int main(int argc, char **argv) {
   args.shutdown_dart_vm_when_done = true;
   args.log_message_callback = log_callback;
 
-#if defined(_WIN32) || defined(__APPLE__)
+#if defined(__APPLE__)
   args.vm_snapshot_data = vm_snapshot_data;
   args.vm_snapshot_instructions = vm_snapshot_instr;
   args.isolate_snapshot_data = isolate_snapshot_data;
   args.isolate_snapshot_instructions = isolate_snapshot_instr;
 #else
+  // Windows and Linux use ELF-based AOT data
   args.aot_data = g_aot_data;
 #endif
 
@@ -435,9 +484,8 @@ int main(int argc, char **argv) {
       FlutterEngineRun(FLUTTER_ENGINE_VERSION, &config, &args, NULL, &g_engine);
   if (result != kSuccess) {
     fprintf(stderr, "FlutterEngineRun failed: %d\n", result);
-    free(assets_path);
-    free(icu_path);
-    return 1;
+    exit_code = 1;
+    goto cleanup_and_exit;
   }
 
   fprintf(stdout, "Flutter engine started. Using bundle: %s\n", bundle_root);
@@ -447,7 +495,11 @@ int main(int argc, char **argv) {
     if (!pop_task(&task)) {
       // Idle briefly to avoid a tight loop.
 #ifdef _WIN32
-      Sleep(5);
+      if (g_shutdown_event) {
+        WaitForSingleObject(g_shutdown_event, 5);
+      } else {
+        Sleep(5);
+      }
 #else
       struct timespec ts = {.tv_sec = 0, .tv_nsec = 5 * NSEC_PER_MSEC};
       nanosleep(&ts, NULL);
@@ -463,27 +515,7 @@ int main(int argc, char **argv) {
     FlutterEngineRunTask(g_engine, &task.task);
   }
 
-  fprintf(stdout, "Shutting down Flutter engine...\n");
-  FlutterEngineShutdown(g_engine);
-
-#ifdef _WIN32
-  if (g_aot_dylib) {
-    FreeLibrary(g_aot_dylib);
-  }
-#elif defined(__APPLE__)
-  if (g_aot_dylib) {
-    dlclose(g_aot_dylib);
-  }
-#else
-  if (g_aot_data) {
-    FlutterEngineCollectAOTData(g_aot_data);
-  }
-#endif
-
-  free(assets_path);
-  free(icu_path);
-  free(aot_lib_path);
-  free(g_tasks);
-
-  return 0;
+cleanup_and_exit:
+  cleanup(assets_path, icu_path, aot_lib_path);
+  return exit_code;
 }

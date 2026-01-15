@@ -1,3 +1,5 @@
+#!/bin/bash
+
 os=$(uname -s)
 arch=$(uname -m)
 
@@ -47,8 +49,8 @@ cp -r lib/${osarch} build/
 echo "Assembling flutter assets"
 
 cd ../
-flutter build bundle --release --asset-dir=clib/build/${osarch}/flutter_assets
-flutter assemble --output=clib/build/${osarch} -dTargetPlatform=darwin -dDarwinArchs=arm64 -dBuildMode=release -dTreeShakeIcons=true release_macos_bundle_flutter_assets
+fvm flutter build bundle --release --asset-dir=clib/build/${osarch}/flutter_assets
+fvm flutter assemble --local-engine=host_release --local-engine-host=host_release --output=clib/build/${osarch} -dTargetPlatform=darwin -dDarwinArchs=arm64 -dBuildMode=release -dTreeShakeIcons=true release_macos_bundle_flutter_assets
 if [ $? -ne 0 ]; then
     echo "Failed to assemble flutter assets"
     exit 1
@@ -56,11 +58,11 @@ fi
 
 cd clib/build/${osarch}
 
-echo "Building embedder (running cmake)"
+echo "Building embeddedFlutterApp (running cmake)"
 
 cmake ../..
 
-echo "Building embedder (running make)"
+echo "Building embeddedFlutterApp (running make)"
 make
 
 echo "Cleaning up"
@@ -70,7 +72,3 @@ rm Makefile
 rm CMakeCache.txt
 rm -rf *.dSYM
 rm .last_build_id
-
-echo "Running embedder"
-
-./embedder

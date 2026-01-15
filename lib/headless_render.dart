@@ -13,13 +13,14 @@ const String opensansFontFamily = 'OpenSans';
 Future<void> loadFonts() async {
   final FontLoader opensansLoader = FontLoader(opensansFontFamily);
   final currentDir = Directory.current.uri;
-  final directory = Directory(currentDir.resolve(_opensansFontDirectory).path);
+  final directory = Directory(currentDir.resolve(_opensansFontDirectory).toFilePath(windows: Platform.isWindows));
   for (final file in directory.listSync(recursive: true)) {
     if (file.path.endsWith('.ttf')) {
-      opensansLoader.addFont(rootBundle.load(file.path));
+      final bytes = await File(file.path).readAsBytes();
+      opensansLoader.addFont(Future.value(ByteData.view(bytes.buffer)));
     }
   }
-  await Future.wait(<Future<void>>[opensansLoader.load()]);
+  await opensansLoader.load();
 }
 
 Future<Uint8List> createImageFromWidget(Widget widget, Size size, {Duration? wait, double pixelRatio = 1.0}) async {

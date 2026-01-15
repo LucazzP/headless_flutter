@@ -6,7 +6,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # Auto-detect platform/arch and set appropriate library name/path
 if(WIN32)
-  set(FLUTTER_ENGINE_LIB_NAME "flutter_engine.dll")
+  set(FLUTTER_ENGINE_LIB_NAME "flutter_engine.dll.lib")
   set(FLUTTER_PLATFORM_DIR "windows-x64")
 elseif(APPLE)
   set(FLUTTER_ENGINE_LIB_NAME "libflutter_engine.dylib")
@@ -30,14 +30,14 @@ endif()
 
 message(STATUS "Using Flutter engine: ${FLUTTER_ENGINE_LIB}")
 
-add_executable(embedder main.c)
+add_executable(embeddedFlutterApp main.c)
 
-target_include_directories(embedder
+target_include_directories(embeddedFlutterApp
   PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
 )
 
-target_link_libraries(embedder
+target_link_libraries(embeddedFlutterApp
   PRIVATE
     ${FLUTTER_ENGINE_LIB}
 )
@@ -46,22 +46,22 @@ if(WIN32)
   # Windows: No additional libraries needed (threading is in kernel32)
 elseif(APPLE)
   # macOS: pthread is needed, libdl is not
-  target_link_libraries(embedder PRIVATE pthread)
+  target_link_libraries(embeddedFlutterApp PRIVATE pthread)
 else()
   # Linux: pthread and dl are needed
-  target_link_libraries(embedder PRIVATE pthread dl)
+  target_link_libraries(embeddedFlutterApp PRIVATE pthread dl)
 endif()
 
 # Ensure the engine library can be located at runtime next to the executable.
 if(WIN32)
   # Windows finds DLLs in the executable directory by default
 elseif(APPLE)
-  set_target_properties(embedder PROPERTIES
+  set_target_properties(embeddedFlutterApp PROPERTIES
     INSTALL_RPATH "@loader_path"
     BUILD_WITH_INSTALL_RPATH TRUE
   )
 else()
-  set_target_properties(embedder PROPERTIES
+  set_target_properties(embeddedFlutterApp PROPERTIES
     INSTALL_RPATH "$ORIGIN"
     BUILD_WITH_INSTALL_RPATH TRUE
   )

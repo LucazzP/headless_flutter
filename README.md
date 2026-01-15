@@ -2,6 +2,14 @@
 
 This is a headless Flutter renderer that can be used to render Flutter widgets to images. Using C lib with flutter embedded to create the binary.
 
+## Debugging
+
+To debug, you can use flutter normally, the unique difference, is that since this is headless, it will not have an UI, so you need to run the app as a flutter test, since tests does not launch any device!
+
+```sh
+fvm flutter run -d flutter-tester lib/main.dart
+```
+
 ## Requirements
 
 - fvm (flutter version manager)

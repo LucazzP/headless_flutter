@@ -1,15 +1,13 @@
 // Minimal headless Flutter embedder to run `lib/main.dart` without a device.
 // Builds against the Flutter engine embedder library (flutter_embedder.h).
-// Expect a bundle layout produced by `flutter build bundle` or a desktop build:
-// <bundle>/
-//   data/flutter_assets/
-//   data/icudtl.dat
-//   lib/libapp.so               (release/profile AOT)
+// Expects bundle assets in the same directory as the executable:
+//   <exe_dir>/
+//     flutter_assets/
+//     icudtl.dat
+//     app.so (or libapp.dylib on macOS)
 //
-// Run with:
-//   ./embeddedFlutterApp /absolute/path/to/bundle
-// or set FOO_BUNDLE_PATH to the same directory. The process stays alive until
-// SIGINT/SIGTERM (or Ctrl+C on Windows).
+// All command-line arguments are passed directly to the Flutter application.
+// The process stays alive until SIGINT/SIGTERM (or Ctrl+C on Windows).
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -255,21 +253,58 @@ static char *join_path(const char *base, const char *suffix) {
   return result;
 }
 
-static const char *bundle_path_from_args(int argc, char **argv) {
-  const char *env_path = getenv("FOO_BUNDLE_PATH");
-  if (env_path && env_path[0] != '\0')
-    return env_path;
-  if (argc > 1)
-    return argv[1];
+// Get the directory containing the executable
+static const char *get_executable_dir(const char *argv0) {
+  static char exe_dir[4096];
   
-  // Return current working directory
-  static char cwd[4096];
 #ifdef _WIN32
-  GetCurrentDirectoryA(sizeof(cwd), cwd);
+  // On Windows, get the full path of the executable
+  DWORD len = GetModuleFileNameA(NULL, exe_dir, sizeof(exe_dir));
+  if (len > 0 && len < sizeof(exe_dir)) {
+    // Find the last backslash or forward slash
+    char *last_sep = strrchr(exe_dir, '\\');
+    char *last_fwd = strrchr(exe_dir, '/');
+    if (last_fwd && (!last_sep || last_fwd > last_sep)) {
+      last_sep = last_fwd;
+    }
+    if (last_sep) {
+      *last_sep = '\0';
+    }
+    return exe_dir;
+  }
 #else
-  getcwd(cwd, sizeof(cwd));
+  // On Unix, try /proc/self/exe first, then fall back to argv[0]
+  ssize_t len = readlink("/proc/self/exe", exe_dir, sizeof(exe_dir) - 1);
+  if (len > 0) {
+    exe_dir[len] = '\0';
+    char *last_sep = strrchr(exe_dir, '/');
+    if (last_sep) {
+      *last_sep = '\0';
+    }
+    return exe_dir;
+  }
+  
+  // Fallback: use argv[0] if it contains a path separator
+  if (argv0 && strchr(argv0, '/')) {
+    strncpy(exe_dir, argv0, sizeof(exe_dir) - 1);
+    exe_dir[sizeof(exe_dir) - 1] = '\0';
+    char *last_sep = strrchr(exe_dir, '/');
+    if (last_sep) {
+      *last_sep = '\0';
+    }
+    return exe_dir;
+  }
 #endif
-  return cwd;
+  
+  // Last resort: current working directory
+#ifdef _WIN32
+  GetCurrentDirectoryA(sizeof(exe_dir), exe_dir);
+#else
+  if (getcwd(exe_dir, sizeof(exe_dir)) == NULL) {
+    strcpy(exe_dir, ".");
+  }
+#endif
+  return exe_dir;
 }
 
 // Cleanup function to ensure all resources are freed
@@ -325,7 +360,8 @@ int main(int argc, char **argv) {
 
   install_signal_handlers();
 
-  const char *bundle_root = bundle_path_from_args(argc, argv);
+  // Bundle is in the same directory as the executable
+  const char *bundle_root = get_executable_dir(argv[0]);
   assets_path = join_path(bundle_root, "flutter_assets");
   icu_path = join_path(bundle_root, "icudtl.dat");
 
@@ -456,6 +492,11 @@ int main(int argc, char **argv) {
   args.icu_data_path = icu_path;
   args.shutdown_dart_vm_when_done = true;
   args.log_message_callback = log_callback;
+  
+  // Pass command-line arguments to Dart main(List<String> args)
+  // Skip argv[0] (executable path) so only actual arguments are passed
+  args.dart_entrypoint_argc = argc > 1 ? argc - 1 : 0;
+  args.dart_entrypoint_argv = argc > 1 ? (const char *const *)&argv[1] : NULL;
 
 #if defined(__APPLE__)
   args.vm_snapshot_data = vm_snapshot_data;
@@ -488,7 +529,8 @@ int main(int argc, char **argv) {
     goto cleanup_and_exit;
   }
 
-  fprintf(stdout, "Flutter engine started. Using bundle: %s\n", bundle_root);
+  fprintf(stdout, "Flutter engine started. Bundle path: %s\n", bundle_root);
+  fprintf(stdout, "Dart entrypoint arguments: %d\n", argc > 1 ? argc - 1 : 0);
 
   while (g_running) {
     ScheduledTask task;

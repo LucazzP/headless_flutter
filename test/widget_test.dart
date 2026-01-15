@@ -24,7 +24,7 @@ void main() {
       ),
       size,
     );
-    final imagePath = Directory.current.uri.resolve('test.png').path;
+    final imagePath = Directory.current.uri.resolve('test.png').toFilePath(windows: Platform.isWindows);
     await File(imagePath).writeAsBytes(image);
   });
 }

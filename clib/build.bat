@@ -29,7 +29,7 @@ xcopy /e /i /y lib\%osarch% build\%osarch%
 echo Building flutter bundle
 
 pushd ..
-call fvm flutter build bundle --local-engine=host_release --local-engine-host=host_release --release --asset-dir=clib/build/%osarch%/flutter_assets
+call fvm flutter build bundle -t lib/main.dart --local-engine=host_release --local-engine-host=host_release --release --asset-dir=clib/build/%osarch%/flutter_assets
 if %ERRORLEVEL% neq 0 (
     echo Failed to assemble flutter assets
     popd
@@ -37,7 +37,7 @@ if %ERRORLEVEL% neq 0 (
 )
 
 echo Assembling flutter
-call fvm flutter assemble --local-engine=host_release --local-engine-host=host_release --output=clib/build/%osarch% -dTargetPlatform=windows-%arch_str% -dTargetArchitecture=%arch_str% -dBuildMode=release -dTreeShakeIcons=true release_bundle_windows-%arch_str%_assets
+call fvm flutter assemble -dTargetFile=lib/main.dart --local-engine=host_release --local-engine-host=host_release --output=clib/build/%osarch% -dTargetPlatform=windows-%arch_str% -dTargetArchitecture=%arch_str% -dBuildMode=release -dTreeShakeIcons=true release_bundle_windows-%arch_str%_assets
 if %ERRORLEVEL% neq 0 (
     echo Failed to assemble flutter
     popd

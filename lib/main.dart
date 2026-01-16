@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:foo/headless_render.dart';
 
-void main() async {
+Future<void> main() async {
   await runZonedGuarded(
     () async {
       print('Creating image...');

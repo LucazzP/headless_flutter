@@ -49,3 +49,4 @@ clib/build
 .fvm/
 /windows
 /clib/windows
+test.png

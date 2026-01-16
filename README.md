@@ -10,6 +10,10 @@ To debug, you can use flutter normally, the unique difference, is that since thi
 fvm flutter run -d flutter-tester lib/main.dart
 ```
 
+If you want to run in a IDE to debug the code, VS Code is already configured, but if you want to configure it yourself, the strategy is:
+
+Since we should not launch any device, and Dart extension insist to launch a device if I try to run any file outside of test folder, I've made a trick to workaround that. We have the `test/debug_main_test.dart` file, that is a simple test file that calls the `main` function from `lib/main.dart`. Resulting in the same thing as running directly from the main file, but without launching any device.
+
 ## Requirements
 
 - fvm (flutter version manager)

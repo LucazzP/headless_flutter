@@ -13,16 +13,15 @@ import 'package:foo/headless_render.dart';
 
 void main() {
   test('createImageFromWidget', () async {
-    final size = const Size(1000, 1000);
-    TestWidgetsFlutterBinding.ensureInitialized();
-    final image = await createImageFromWidget(
+    final headlessRender = HeadlessRender();
+    final image = await headlessRender.createImageFromWidget(
       Center(
         child: Container(
           color: Colors.orange,
           child: Text('Hello, World!', style: TextStyle(fontSize: 20, color: Colors.black)),
         ),
       ),
-      size,
+      width: 512,
     );
     final imagePath = Directory.current.uri.resolve('test.png').toFilePath(windows: Platform.isWindows);
     await File(imagePath).writeAsBytes(image);
